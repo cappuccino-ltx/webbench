@@ -12,8 +12,9 @@
 #include <chrono>
 #include <iostream>
 #include <string>
-#include <cinttypes> 
+#include <string.h>
 #include <cstdlib> 
+#include <signal.h>
 
 namespace asio = boost::asio;
 using tcp = asio::ip::tcp;
@@ -219,16 +220,26 @@ private:
 
     void async_read(std::shared_ptr<tcp::socket> socket)
     {
-        auto response = std::make_shared<std::vector<char>>(1024);
+        // auto response = std::make_shared<std::vector<char>>(4096, 0);
+        auto response = std::make_shared<std::string>();
 
         // 异步接收数据
-        socket->async_read_some(asio::buffer(*response),
+        // socket->async_read_some(asio::buffer(*response),
+        asio::async_read(*socket, asio::dynamic_buffer(*response), asio::transfer_at_least(1),
                                 [this, socket, response](boost::system::error_code ec, std::size_t bytes_read) {
                                     if (!ec)
                                     {
+                                        size_t count = 0;
+                                        size_t pos = 0;
+                                        while(true) {
+                                            pos = strlen(response->data() + count);
+                                            if (pos == 0) {
+                                                break;
+                                            }
+                                            count += ++pos;// 算上 \0
+                                        }
                                         // 接收成功，统计数据量
-                                        _data_count += bytes_read + _req.size();
-                                        
+                                        _data_count += count - 1 + _req.size(); // 减去最后一个\0
 
                                         // 关闭连接
                                         socket->close();
@@ -391,9 +402,12 @@ int test2(int argc, char **argv)
             uint64_t count = conn.getCount();
             uint64_t failed = conn.getFailed();
             // std::cout << "发送请求 : " << count << " " << failed << " " << data_count << std::endl;
-            char buffer[1024];
+            char buffer[128];
             sprintf(buffer,"%lu %lu %lu",count,failed,data_count);
-            write(pipefd[1],&buffer,sizeof(buffer));
+            int n = write(pipefd[1],&buffer,sizeof(buffer));
+            if (n < 0) {
+                abort();
+            }
             close(pipefd[1]);
             exit(0);
         }
@@ -452,6 +466,6 @@ int test2(int argc, char **argv)
 }
 
 int main(int argc, char **argv) {
+    signal(SIGPIPE, SIG_IGN);
     return test2(argc, argv);
-    
 }
