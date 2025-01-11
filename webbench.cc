@@ -140,7 +140,7 @@ public:
 
     void start()
     {
-        // auto start = std::chrono::high_resolution_clock::now();
+        auto start = std::chrono::high_resolution_clock::now();
 
         // 启动多个异步连接
         
@@ -179,6 +179,9 @@ public:
 private:
     void start_async_connect()
     {
+        if (_count + _failed >= _request_num) {
+            return;  // 如果已经达到请求数量，不再启动新的连接
+        }
         auto socket = std::make_shared<tcp::socket>(_context);
 
         // 异步连接
@@ -249,12 +252,7 @@ private:
                                         // 接收失败
                                         _failed++;
                                     }
-
-                                    // 如果还有未完成的请求，启动下一个连接
-                                    if (_count + _failed < _request_num)
-                                    {
-                                        start_async_connect();
-                                    }
+                                    start_async_connect();
                                 });
     }
 };
@@ -347,8 +345,11 @@ int test2(int argc, char **argv)
 
     // 检查 -h 和 -p 是否被指定
     if (ip.empty() || p_value == 0) {
-        std::cerr << "错误: 必须指定 -h（IP 地址）和 -p（端口号）\n";
-        std::cerr << "用法: " << argv[0] << " -h<IP地址> -p<端口号> [-c<值>] [-n<值>]\n";
+        std::cerr << "错误: 必须指定 -h<IP 地址>和 -p<端口号>\n";
+        std::cerr << "用法: " << argv[0] << " -h <IP地址> " << std::endl << \
+                "-p <端口号> " <<  std::endl << \
+                "[-c <请求端数量> 默认 1 ] " <<  std::endl << \
+                "[-n <单端请求次数> 默认 10 ] \n";
         return 1;
     }
 
@@ -371,8 +372,6 @@ int test2(int argc, char **argv)
 
     std::vector<pid_t> child_pids;
 
-    // 记录开始时间
-    auto start_time = std::chrono::high_resolution_clock::now();
     // 保存管道
     std::vector<int> pipe_fds(num_processes);
 
@@ -396,14 +395,20 @@ int test2(int argc, char **argv)
             
             int clients_per_process = (i == num_processes - 1) ? (c_value - (threads_per_process * i)) : threads_per_process;
             AsyncConnect conn(host, port, clients_per_process, n_value);
-            
+            // 开始计时
+            auto start = std::chrono::high_resolution_clock::now();
             conn.start();
+            // 结束计时
+            auto end = std::chrono::high_resolution_clock::now();
+            uint64_t start_time = std::chrono::duration_cast<std::chrono::milliseconds>(start.time_since_epoch()).count();
+            uint64_t end_time = std::chrono::duration_cast<std::chrono::milliseconds>(end.time_since_epoch()).count();
+
             uint64_t data_count = conn.getDateCount();
             uint64_t count = conn.getCount();
             uint64_t failed = conn.getFailed();
-            // std::cout << "发送请求 : " << count << " " << failed << " " << data_count << std::endl;
+
             char buffer[128];
-            sprintf(buffer,"%lu %lu %lu",count,failed,data_count);
+            sprintf(buffer,"%lu %lu %lu %lu %lu", start_time, end_time, count,failed,data_count);
             int n = write(pipefd[1],&buffer,sizeof(buffer));
             if (n < 0) {
                 abort();
@@ -426,6 +431,8 @@ int test2(int argc, char **argv)
     }
 
     // 父进程读取子进程的统计结果
+    std::chrono::milliseconds begin = std::chrono::milliseconds::max();
+    std::chrono::milliseconds end = std::chrono::milliseconds::min();
     uint64_t total_requests = 0;
     uint64_t failed_requests = 0;
     uint64_t total_data = 0;
@@ -435,11 +442,15 @@ int test2(int argc, char **argv)
         ssize_t bytes_read = read(pipe_fds[i], buffer, sizeof(buffer));
         if (bytes_read > 0) {
             buffer[bytes_read] = '\0';
-            
+            uint64_t start_time = 0;
+            uint64_t end_time = 0;
             uint64_t count = 0;
             uint64_t failed = 0;
             uint64_t data_count = 0;
-            sscanf(buffer, "%lu %lu %lu", &count, &failed, &data_count);
+            sscanf(buffer, "%lu %lu %lu %lu %lu",&start_time, &end_time, &count, &failed, &data_count);
+            // 统计时间
+            begin = std::min(begin, std::chrono::milliseconds(start_time));
+            end = std::max(end, std::chrono::milliseconds(end_time));
             total_requests += count;
             failed_requests += failed;
             total_data += data_count;
@@ -452,14 +463,13 @@ int test2(int argc, char **argv)
         waitpid(pid, nullptr, 0);
     }
 
-    // 记录结束时间
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+    // 计算总时间
+    std::chrono::milliseconds duration(end - begin);
 
     std::cout << "==========================================" << std::endl;
-    std::cout << "一共发送请求 : " << total_requests << std::endl;
-    std::cout << "失败次数 : " << failed_requests << std::endl;
-    std::cout << "网络吞吐量 : " << (total_data / ((duration.count() / 1000) == 0 ? 1 : (duration.count() / 1000))) << " byte/s" << std::endl;
+    std::cout << "发送请求次数 : " << total_requests << std::endl;
+    std::cout << "请求失败次数 : " << failed_requests << std::endl;
+    std::cout << "平均网络吞吐 : " << (total_data / ((duration.count() / 1000) == 0 ? 1 : (duration.count() / 1000))) << " byte/s" << std::endl;
     std::cout << "==========================================" << std::endl;
 
     return 0;
